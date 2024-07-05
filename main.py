@@ -12,7 +12,7 @@ def main():
     youtube_music_client = YouTubeMusicClient()
     youtube_music_playlists = youtube_music_client.fetch_playlists()
     print(youtube_music_playlists)
-    youtube_music_client.create_youtube_test_playlist_from_spotify("Test Playlist", my_playlists)
+    youtube_music_client.create_youtube_playlists_from_spotify(my_playlists)
     youtube_music_playlists = youtube_music_client.fetch_playlists()
     print(youtube_music_playlists)
     # youtube_music_client.print_youtube_music_playlists(youtube_music_playlists)
