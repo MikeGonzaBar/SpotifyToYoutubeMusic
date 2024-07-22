@@ -1,7 +1,9 @@
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from typing import List, Dict, Any
-import time 
+import json
+import os
+import time
 
 SCOPES = ["https://www.googleapis.com/auth/youtube"]
 
@@ -15,7 +17,21 @@ class YouTubeMusicClient:
         flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
         credentials = flow.run_local_server(port=8080)
         self.client = build('youtube', 'v3', credentials=credentials)
-        self.searchQueriesResponses = {}
+        self.cache_file = 'search_cache.json'  # Define the cache_file attribute here
+        self.searchQueriesResponses = self.load_cache()
+    
+    def load_cache(self):
+        """Load the search query cache from a file."""
+        if os.path.exists(self.cache_file):
+            with open(self.cache_file, 'r') as file:
+                return json.load(file)
+        else:
+            return {}
+    
+    def update_cache(self):
+        """Update the cache file with the current state of searchQueriesResponses."""
+        with open(self.cache_file, 'w') as file:
+            json.dump(self.searchQueriesResponses, file, indent=4)
         
     def fetch_playlists(self) -> List[Dict[str, Any]]:
         request = self.client.playlists().list(part="snippet,contentDetails", mine=True, maxResults=50)
@@ -34,32 +50,34 @@ class YouTubeMusicClient:
         :return: A list of dictionaries containing song information.
         """
         print(f"SEARCHING FOR SONG: {query}")  # Debug print
-        # Check if the query already exists in the cache
-        if query in self.searchQueriesResponses:
-            print(f"\tUsing cached result for query: {query}")  # Debug print
-            return self.searchQueriesResponses[query]
-        else:
-            search_response = self.client.search().list(
-                q=query,
-                part="snippet",
-                maxResults=1,
-                type="video"
-            ).execute()
-            time.sleep(0.1)  # Delay to avoid hitting the rate limit
-            songs = [
-                {
-                    'id': item['id']['videoId'],
-                    'title': item['snippet']['title'],
-                    'description': item['snippet']['description'],
-                    'thumbnails': item['snippet']['thumbnails'],
-                }
-                for item in search_response.get('items', [])
-            ]
+        if query not in self.searchQueriesResponses:
+            return self.search_song_by_query(query)
+        print(f"\tUsing cached result for query: {query}")  # Debug print
+        return self.searchQueriesResponses[query]
 
-            # Cache the result for future queries
-            self.searchQueriesResponses[query] = songs
-            print(f"\tFounded songs")  # Debug print
-            return songs
+    def search_song_by_query(self, query):
+        search_response = self.client.search().list(
+            q=query,
+            part="snippet",
+            maxResults=1,
+            type="video"
+        ).execute()
+        time.sleep(0.1)  # Delay to avoid hitting the rate limit
+        songs = [
+            {
+                'id': item['id']['videoId'],
+                'title': item['snippet']['title'],
+                'description': item['snippet']['description'],
+                'thumbnails': item['snippet']['thumbnails'],
+            }
+            for item in search_response.get('items', [])
+        ]
+
+        # Cache the result for future queries
+        self.searchQueriesResponses[query] = songs
+        self.update_cache()
+        print(f"\tFounded songs")  # Debug print
+        return songs
     
     def create_playlist(self, title: str, description: str) -> str:
         """
@@ -84,9 +102,9 @@ class YouTubeMusicClient:
             part="snippet,status",
             body=create_playlist_body
         )
-        response = create_request.execute()
-        time.sleep(1)
-        print(f"\tPlaylist created successfully. ID: {response['id']}")  # Debug print
+        response = self.execute_and_print_result(
+            create_request, '\tPlaylist created successfully. ID: '
+        )
         return response['id']
 
     def add_song_to_playlist(self, playlist_id: str, video_id: str):
@@ -110,9 +128,15 @@ class YouTubeMusicClient:
             part="snippet",
             body=add_video_body
         )
-        response = add_request.execute()
+        response = self.execute_and_print_result(
+            add_request, '\tSong added successfully. Item ID: '
+        )
+
+    def execute_and_print_result(self, arg0, arg1):
+        result = arg0.execute()
         time.sleep(1)
-        print(f"\tSong added successfully. Item ID: {response['id']}")  # Debug print
+        print(f"{arg1}{result['id']}")
+        return result
         
     def fetch_playlist_songs(self, playlist_id: str) -> List[Dict[str, Any]]:
         """
@@ -131,13 +155,15 @@ class YouTubeMusicClient:
         while request:
             response = request.execute()
             time.sleep(1)
-            for item in response.get('items', []):
-                songs.append({
+            songs.extend(
+                {
                     'id': item['snippet']['resourceId']['videoId'],
                     'title': item['snippet']['title'],
                     'description': item['snippet']['description'],
                     'thumbnails': item['snippet']['thumbnails'],
-                })
+                }
+                for item in response.get('items', [])
+            )
             # Check if there's a next page
             request = self.client.playlistItems().list_next(request, response)
         print(f"\tSuccessfully fetched {len(songs)} songs from playlist.")
@@ -171,9 +197,7 @@ class YouTubeMusicClient:
                 tracks = playlist['tracks']  # Get all the tracks
                 print(f"Processing Spotify playlist: {title}")  # Debug print
 
-                # Check if a playlist with the same name already exists on YouTube Music
-                existing_playlist_id = self.find_playlist_by_name(title)
-                if existing_playlist_id:
+                if existing_playlist_id := self.find_playlist_by_name(title):
                     print(f"Playlist '{title}' already exists on YouTube Music.")  # Debug print
                     #TODO: CREATE FUNCTION THAT CHECKS SONGS IN PLAYLIST AND ADDS THEM IF NOT FOUND
                     continue
@@ -184,10 +208,9 @@ class YouTubeMusicClient:
                     # Add the first 3 songs to the new playlist
                     for track in tracks:
                         song_name = track['name']
-                        song_artists = ', '.join(artist for artist in track['artists'])
+                        song_artists = ', '.join(track['artists'])
                         search_query = f"{song_name} {song_artists}"
-                        search_result = self.search_song(search_query)
-                        if search_result:
+                        if search_result := self.search_song(search_query):
                             youtube_song_id = search_result[0]['id']
                             self.add_song_to_playlist(new_playlist_id, youtube_song_id)
                         else:
